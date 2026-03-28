@@ -1,0 +1,345 @@
+Project M Overview
+
+1. Data source and notebook entry point
+The notebook now runs directly from my_dataset.csv and no longer requires repeating MIMIC extraction for the standard workflow.
+At the very beginning, the gender variable is recoded as:
+F -> 1
+M -> 0
+This was added up front so every downstream table, test, and model uses a single consistent encoding.
+
+After loading, the dataset contains:
+- 327 observations
+- 49 original variables
+- 51 intubation events
+- intubation rate = 15.6%
+
+This immediately shows that the prediction task is imbalanced, with far fewer positive cases than negative cases.
+
+2. Global data audit
+The first audit table summarizes:
+- data type
+- number of missing values
+- percent missing
+- number of unique values
+
+Main finding:
+- the dataset has substantial missingness in acute physiologic and laboratory variables
+- especially problematic features are CRP 97.9%, PF ratio 92.4%, albumin 89.9%, arterial pH 85.0%, and PaO2 85.0%
+- BMI has 29.7% missingness
+- the target is imbalanced: 84.4% non-intubated vs 15.6% intubated
+
+Why this step matters:
+It shows early that a naive “use everything as is” approach would be weak. Outlier handling, high-missingness decisions, and careful correlation interpretation are necessary.
+
+3. Feature typing
+Variables are then split into:
+- categorical/binary
+- continuous numeric
+
+Not all variables are converted into categorical form.
+This is intentional because age, BMI, vital signs, and laboratory values carry quantitative clinical information. Converting them into categories would destroy ordering and distance information.
+
+4. EDA: distributions and class balance
+The notebook then produces:
+- histograms for numeric variables
+- bar plots for categorical variables
+
+What this shows:
+- many continuous variables are not normally distributed
+- several binary clinical variables are imbalanced
+- non-parametric tests are more appropriate than assuming normality
+
+That is why the notebook uses Mann-Whitney U for numeric group comparisons rather than a t-test.
+
+5. Statistical tests against the target
+For each feature, a relevant statistical test is applied:
+- numeric: Mann-Whitney U + Spearman association
+- categorical/binary: Fisher exact or Chi-square
+
+Most important results:
+- icu_admission_baseline: p < 0.001
+- gcs_total: p = 0.017
+- charlson_index: p = 0.026
+- hypertension: p = 0.039
+- wbc: p = 0.043
+- vasopressor_baseline: p = 0.050
+
+Borderline features:
+- heart_failure: p = 0.058
+- dysphagia: p = 0.065
+- diabetes: p = 0.075
+- dopamine_agonist_use: p = 0.087
+
+Interpretation:
+- baseline ICU admission is strongly associated with later intubation
+- lower GCS is associated with higher intubation risk
+- higher comorbidity burden measured by Charlson also carries signal
+- several acute and baseline severity markers are genuinely informative
+
+6. Correlation structure
+Next, the notebook builds a Spearman correlation heatmap and a ranked correlation table.
+
+Notable pairs:
+- PaO2 and PF ratio: rho = 0.865, p < 0.001, n = 25
+- GCS and albumin: rho = 0.648, p = 0.002, n = 20
+- heart_rate and WBC: rho = 0.447, p < 0.001, n = 53
+- creatinine and charlson_index: rho = 0.374, p < 0.001, n = 92
+
+Key interpretation:
+Some extreme correlations should not be trusted blindly because complete-case overlap is very small for several lab pairs. Still, this step is important because it:
+- highlights possible multicollinearity
+- helps identify highly missing variables that can be removed with limited information loss
+
+7. Boxplots and missingness
+The notebook then creates:
+- boxplots for numeric variables
+- a missingness percentage bar plot
+
+Why this matters:
+- boxplots reveal outliers before treatment
+- the missingness plot makes it clear which variables are too sparse to keep in the final model
+
+8. Treatment: impossible values
+Physiologically plausible bounds are defined for variables such as:
+- BMI
+- heart_rate
+- SBP
+- temperature
+- respiratory rate
+- SpO2
+- FiO2
+- GCS
+- WBC
+- creatinine
+- lactate
+- sodium
+and others
+
+Result:
+- 2 rows were removed because they contained physiologically impossible values
+- the issue came from BMI
+
+Why this choice was made:
+Values that are not physically plausible for a human should not be imputed or winsorized. They are more appropriately removed as data errors or extraction artifacts.
+
+9. Treatment: IQR-based outlier capping
+After removing impossible values, IQR capping is applied to clinically plausible but extreme values.
+
+IQR clipping was applied to 14 continuous features.
+The most affected variables were:
+- lactate
+- FiO2
+- sodium
+- creatinine
+- WBC
+- temperature
+- GCS
+- SBP
+- SpO2
+- respiratory rate
+- heart_rate
+- BMI
+
+Why this approach was chosen:
+- it preserves severe but plausible clinical cases
+- while reducing the leverage of extreme values in logistic regression
+
+10. Treatment: missing values
+After reviewing missingness, the following decisions were made.
+
+Dropped as too sparse and not reliable enough for final modeling:
+- crp
+- albumin
+- ph_arterial
+- pao2
+- pf_ratio
+
+Why:
+- each had more than 85% missingness
+- some were redundant with each other
+- complete-case overlap was too small to support stable modeling
+
+Constant variables that were also removed:
+- parkinson_dx
+- pneumonia_any
+
+Why:
+- in this cohort they did not add useful variability
+
+For clinically important variables with high missingness, both the raw feature and a missing indicator were kept:
+- heart_rate_missing
+- sbp_missing
+- temperature_c_missing
+- resp_rate_missing
+- spo2_missing
+- fio2_missing
+- gcs_total_missing
+- wbc_missing
+- creatinine_missing
+- lactate_missing
+- sodium_missing
+
+Why this matters:
+In this problem, the fact that a measurement is missing may itself carry signal, because it reflects clinical workflow and illness intensity.
+
+11. VIF and PCA / UMAP decision
+Multicollinearity was checked using VIF.
+
+Result:
+- all VIF values were low, roughly from 1.05 to 1.29
+
+This means:
+- there is no serious multicollinearity in the final feature set
+- no feature needed to be removed due to VIF inflation
+
+PCA was also evaluated:
+- about 10 principal components are needed to explain roughly 90.4% of variance
+
+Conclusion:
+- PCA does not provide strong compact compression here
+- PCA and UMAP were not used in the final model
+
+Why:
+- the dataset is small
+- the final feature count is moderate
+- interpretability matters more than latent embedding
+
+12. Train / dev / test split
+The cleaned dataset is split into:
+- train: 195 rows, 30 events, event rate 15.4%
+- dev: 65 rows, 10 events, event rate 15.4%
+- test: 65 rows, 10 events, event rate 15.4%
+
+Why this is good:
+- the split is stratified
+- the positive class rate is stable across all partitions
+- tuning and final evaluation are properly separated
+
+13. Model comparison on dev
+Several models from the same family you preferred were compared:
+- History-only
+- History + Acute
+- History + Acute (No ICU)
+- Compact Clinical
+- Elastic Net
+
+Dev results:
+- Elastic Net: ROC-AUC 0.960, PR-AUC 0.829, Brier 0.167
+- Compact Clinical: ROC-AUC 0.918, PR-AUC 0.827
+- History + Acute: ROC-AUC 0.949, PR-AUC 0.735
+- History + Acute (No ICU): ROC-AUC 0.925, PR-AUC 0.711
+- History-only: ROC-AUC 0.709, PR-AUC 0.350
+
+Interpretation:
+- baseline/history features alone are not enough
+- acute features materially improve prediction
+- Elastic Net emerges as the best candidate
+
+14. Elastic Net fine-tuning
+A grid search was then run over:
+- l1_ratio
+- C
+
+Best dev configuration:
+- l1_ratio = 0.7
+- C = 0.5
+- dev ROC-AUC = 0.960
+- dev PR-AUC = 0.851
+- dev Brier = 0.169
+
+Why this makes sense:
+- Elastic Net provides a good balance of regularization and stability
+- with this sample size, it is more appropriate than moving to overly complex models
+
+15. Final evaluation on test
+After combining train + dev, final models were evaluated on the held-out test set.
+
+Results:
+- Elastic Net tuned: ROC-AUC 0.704, PR-AUC 0.520, Brier 0.185
+- Compact Clinical: ROC-AUC 0.618, PR-AUC 0.470
+- History + Acute: ROC-AUC 0.676, PR-AUC 0.450
+- History + Acute (No ICU): ROC-AUC 0.604, PR-AUC 0.322
+- History-only: ROC-AUC 0.552, PR-AUC 0.185
+
+Selected final model:
+- Elastic Net tuned
+
+How to interpret this:
+- performance looked very strong on dev, then decreased on test
+- that is expected with a small dataset and only 10 events in the test split
+- despite that drop, Elastic Net still remained the best option among all evaluated models
+
+16. Threshold analysis
+Thresholds were checked for the final model.
+
+At threshold 0.4:
+- sensitivity = 0.60
+- specificity = 0.691
+- precision = 0.261
+- NPV = 0.905
+
+At threshold 0.2:
+- sensitivity = 0.90
+- specificity = 0.273
+
+Interpretation:
+- if the clinical goal is to avoid missing high-risk patients, a lower threshold gives high sensitivity
+- if the goal is to reduce false alarms, the threshold should be increased
+
+17. Most influential coefficients in the final model
+Among the strongest coefficients:
+- fio2_missing = -1.786
+- gcs_total_missing = 1.495
+- icu_admission_baseline = 1.478
+- lactate_missing = 0.948
+- dopamine_agonist_use = 0.798
+- renal_failure = -0.657
+- dysphagia = 0.619
+- sodium_missing = 0.540
+- creatinine_missing = 0.540
+- vasopressor_baseline = 0.499
+- charlson_index = 0.419
+- heart_rate = -0.372
+- gender_1 = -0.319
+
+How to read this:
+- a positive coefficient increases log-odds of intubation
+- a negative coefficient decreases it
+- gender_1 corresponds to female compared with the male reference, so in this model female sex is associated with lower risk relative to male
+- missing indicators are genuinely informative, meaning the measurement pattern itself contains signal
+
+18. Bootstrap confidence intervals
+Bootstrap confidence intervals on the test set were:
+- ROC-AUC = 0.704, 95% CI 0.505-0.903
+- PR-AUC = 0.520, 95% CI 0.244-0.808
+
+Interpretation:
+- the intervals are wide
+- this reflects the small test sample
+- the model should therefore be interpreted as a pilot predictive model rather than a fully stable clinical deployment tool
+
+19. Interpretable logistic regression
+For more clinically transparent interpretation, a simplified logistic regression was also fitted.
+
+Statistically significant terms were:
+- age: OR 0.955, p = 0.031
+- charlson_index: OR 1.200, p = 0.027
+
+The remaining compact-model variables did not reach statistical significance.
+
+Interpretation:
+- in this cohort, higher Charlson burden is associated with higher intubation risk
+- age shows an OR below 1 in this adjusted model, meaning the relationship with the outcome is not simply “older is always worse” and depends on the structure of this cohort and the accompanying predictors
+
+20. Final project conclusion
+The final version of the project now does the following:
+- removes extraction from the standard workflow
+- runs directly from my_dataset.csv
+- replaces EDA with a clinically and statistically coherent workflow
+- handles outliers and missingness explicitly and transparently
+- checks correlations, VIF, and PCA
+- aligns the model with the new preprocessing logic
+- selects Elastic Net tuned as the best final model
+
+Main practical takeaway:
+The most useful signal in this project comes not only from acute physiologic variables themselves, but also from which measurements were missing. In this cohort, baseline severity plus the measurement pattern provide substantial predictive information.
